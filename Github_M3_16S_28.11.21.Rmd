@@ -1,0 +1,1439 @@
+---
+title: "Seq_16S"
+author: "FD"
+date: "8/8/2019"
+output: html_document
+---
+
+```{r packages}
+library(phyloseq)  
+library(ggplot2)
+library(ggthemes)
+library("DESeq2")
+library(dplyr)
+library(ALDEx2)
+library(devtools)
+library(MuMIn)
+library(pvclust)
+library(vegan)
+library(Rmisc)
+library(microbiome)
+library(scales)
+library(edgeR)
+library(patchwork)
+
+###Set working directory and add files
+```
+
+```{r ggplot2 setup}
+#Set up position dodge for ggplot2
+pd = position_dodge(0.15)
+
+set.seed(2)
+
+My_Theme = theme(axis.title.x = element_text(size=18),
+        axis.text.x = element_text(angle=0, colour = "black", vjust=1, hjust = 0.5, size=18), 
+        axis.text.y = element_text(colour = "black", size=18),
+        axis.title.y = element_text(face="bold",size=18),
+        plot.title = element_text(size = 18),
+        legend.title =element_text(size = 18),
+        legend.text = element_text(size = 16),
+        legend.position="right",
+        legend.key.size = unit(1, "cm"),
+        strip.text.x = element_text(size=18, face="bold"),
+        strip.text.y = element_text(size=18, face="bold"),
+        #panel.background = element_blank(),
+        panel.border = element_rect(fill = NA, colour = "black"),
+        strip.background = element_rect(colour="black"))
+```
+
+```{r Import and Subset}
+ASV_16S <-  paste("/Users/fenelladeans/OneDrive/Documents_2017/PhD/2019_Sequencing/", "Phyloseq_object_16S.rds", sep = "")
+ASV_16S
+ASV_16S_Phyloseq= readRDS(ASV_16S)
+ASV_16S_Phyloseq
+
+ASV_16S_Phyloseq_M3 = subset_samples(ASV_16S_Phyloseq, Project == "Meso3")
+ASV_16S_Phyloseq_M3
+
+sample_variables(ASV_16S_Phyloseq_M3)
+
+ASV_16S_Phyloseq_M3 = subset_samples(ASV_16S_Phyloseq_M3, X.SampleID != "M3xD0x10P" & X.SampleID != "M3xD0x10V"& X.SampleID != "M3xP1"& X.SampleID != "M3xP3A"& X.SampleID != "M3xP3B"& X.SampleID != "M3xP4"& X.SampleID != "M3xP5"& X.SampleID != "M3xP6"& X.SampleID != "M3xP7" & X.SampleID != "M3xP8" & X.SampleID != "M3xP9" )
+
+sample_sums(ASV_16S_Phyloseq_M3)
+```
+
+##Compare sequences per sample or ASV
+```{r Compare sequences per sample or ASV}
+readsumsdf = data.frame(nreads = sort(taxa_sums(ASV_16S_Phyloseq_M3),TRUE), sorted = 1:ntaxa(ASV_16S_Phyloseq_M3), type = "ASV")
+readsumsdf = rbind(readsumsdf,data.frame(nreads = sort(sample_sums(ASV_16S_Phyloseq_M3),TRUE),sorted = 1:nsamples(ASV_16S_Phyloseq_M3), type = "Samples"))
+
+title = "Total number of reads"
+
+p = ggplot(readsumsdf, aes(x = sorted, y = nreads)) +
+  geom_bar(stat = "identity")
+
+p + ggtitle(title) +
+  scale_y_log10() +
+  facet_wrap(~type, 1, scales = "free")
+```
+##Rarefaction curves
+```{r Attic}
+sample_sums(ASV_16S_Phyloseq_M3)
+rarefaction_list = c(1,
+                    10, 
+                    100,
+                    1000,
+                    2000,
+                    3000,
+                    4000,
+                    5000,
+                    6000,
+                    7000,
+                    8000,
+                    9000
+                    )
+
+for (i in rarefaction_list) {
+
+Biofilm_ra = rarefy_even_depth(ASV_16S_Phyloseq_M3, sample.size = min(i))
+for (y in 1:9){
+
+Biofilm_temp = rarefy_even_depth(ASV_16S_Phyloseq_M3, sample.size = min(i))  
+  Object = get(paste0("Biofilm_ra"))
+    
+    Biofilm_ra = merge_phyloseq(ASV_16S_Phyloseq_M3, Object)
+    
+    Object = get(paste0("Biofilm_ra"))
+    assign(paste0("Biofilm_rare_", i, "_16S"), Object)
+  y = y + 1  
+}
+i = i + 1
+}
+
+temp_richness = estimate_richness(ASV_16S_Phyloseq_M3, measures = "Observed")
+```
+
+```{r Function}
+calculate_rarefaction_curves <- function(psdata, measures, depths) {
+  require('plyr') # ldply
+  require('reshape2') # melt
+
+  estimate_rarified_richness <- function(psdata, measures, depth) {
+    if(max(sample_sums(psdata)) < depth) return()
+    psdata <- prune_samples(sample_sums(psdata) >= depth, psdata)
+
+    rarified_psdata <- rarefy_even_depth(psdata, depth, verbose = FALSE)
+
+    alpha_diversity <- estimate_richness(rarified_psdata, measures = measures)
+
+    # as.matrix forces the use of melt.array, which includes the Sample names (rownames)
+    molten_alpha_diversity <- melt(as.matrix(alpha_diversity), varnames = c('Sample', 'Measure'), value.name = 'Alpha_diversity')
+
+    molten_alpha_diversity
+  }
+
+  names(depths) <- depths # this enables automatic addition of the Depth to the output by ldply
+  rarefaction_curve_data <- ldply(depths, estimate_rarified_richness, psdata = psdata, measures = measures, .id = 'Depth', .progress = ifelse(interactive(), 'text', 'none'))
+
+  # convert Depth from factor to numeric
+  rarefaction_curve_data$Depth <- as.numeric(levels(rarefaction_curve_data$Depth))[rarefaction_curve_data$Depth]
+
+  rarefaction_curve_data
+}
+```
+
+```{r Plotting}
+rarefaction_curve_data <- calculate_rarefaction_curves(ASV_16S_Phyloseq_M3, c('Observed'), rep(c(1, 10, 100, 1:100 * 1000), each = 10))
+summary(rarefaction_curve_data)
+
+rarefaction_curve_data_summary <- ddply(rarefaction_curve_data, c('Depth', 'Sample', 'Measure'), summarise, Alpha_diversity_mean = mean(Alpha_diversity), Alpha_diversity_sd = sd(Alpha_diversity))
+
+colnames(rarefaction_curve_data_summary) = gsub("X","", colnames(rarefaction_curve_data_summary))
+rarefaction_curve_data_summary$Sample = gsub("X","", rarefaction_curve_data_summary$Sample)
+
+rarefaction_curve_data_summary_verbose <- merge(rarefaction_curve_data_summary, data.frame(sample_data(ASV_16S_Phyloseq_M3))
+                                                , by.x = 'Sample'
+                                                , by.y = 'row.names'
+                                                )
+
+library('ggplot2')
+
+Rarecurve = ggplot(data = rarefaction_curve_data_summary_verbose,
+  mapping = aes(x = Depth,
+                y = Alpha_diversity_mean,
+                ymin = Alpha_diversity_mean - Alpha_diversity_sd,
+                ymax = Alpha_diversity_mean + Alpha_diversity_sd,
+    colour = as.factor(Sample),
+    group = Sample)) + 
+    geom_line(size = 0.8) + 
+    #geom_pointrange(size = 0.3) + 
+  #facet_wrap(facets = ~ Measure,  scales = 'free_y')+
+  #scale_color_manual(values = Colour_list)+
+  ylab("Observed Mean")+
+  xlab("Tested sequencing depth")+
+  labs(colour = "Time (days)")+
+ # theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme_bw()+
+  My_Theme#+
+ # geom_line(aes(x = 11000, colour = "black"))
+Rarecurve
+pdf("Sampling_Depth_vs_Observed_richness.pdf", height = 6, width = 8)
+Rarecurve
+dev.off()
+```
+
+##rarefy 10 times, combine, and then utilise the averaged result
+```{r Create average result for multiple rarefaction by transforming data using (divide by 10), results='markup'}
+sample_sums(ASV_16S_Phyloseq_M3)
+nrow(ASV_16S_Phyloseq_M3@sam_data)
+#Rarefy samples to an even depth
+Biofilm_ra_all = rarefy_even_depth(ASV_16S_Phyloseq_M3, sample.size = min(9000))
+for (i in 1:9){
+
+Biofilm_ra = rarefy_even_depth(ASV_16S_Phyloseq_M3, sample.size = min(9000))  
+  Object = get(paste0("Biofilm_ra"))
+    
+    Biofilm_ra_all = merge_phyloseq(Biofilm_ra_all, Object)
+  i = i+1  
+}
+
+sample_sums(Biofilm_ra_all) #Check how many sequences remain
+ASV_16S_Phyloseq_M3 = transform_sample_counts(Biofilm_ra_all, function(x) x/10) #Reduce number of sequences to non-inflated amount again
+sample_sums(ASV_16S_Phyloseq_M3) #Check how many sequences remain (should be even numbers)
+
+# Round and confirm count number
+ASV_16S_Phyloseq_M3 = transform_sample_counts(ASV_16S_Phyloseq_M3, round)
+sample_sums(ASV_16S_Phyloseq_M3)
+ASV_16S_Phyloseq_M3 = prune_samples(sample_sums(ASV_16S_Phyloseq_M3)>=1, ASV_16S_Phyloseq_M3)
+sample_sums(ASV_16S_Phyloseq_M3)
+
+```
+##Identify and prune taxa with less than 1 count and check taxa numbers again
+```{r  Save original file and create new file with only present (no zeroes) taxa, results='markup', echo=TRUE}
+# Identify taxa with only zeros, results='markup', echo=TRUE
+sum(taxa_sums(ASV_16S_Phyloseq_M3) > 0)
+any(taxa_sums(ASV_16S_Phyloseq_M3)== 0)
+sum(taxa_sums(ASV_16S_Phyloseq_M3) == 0)
+any(taxa_sums(ASV_16S_Phyloseq_M3) > 1)
+sum(taxa_sums(ASV_16S_Phyloseq_M3) > 1)
+any(taxa_sums(ASV_16S_Phyloseq_M3) < 1)
+sum(taxa_sums(ASV_16S_Phyloseq_M3) < 1)
+
+#Create new file with only present (no zeroes) taxa
+ASV_16S_Phyloseq_M3 = prune_taxa(taxa_sums(ASV_16S_Phyloseq_M3) > 1, ASV_16S_Phyloseq_M3)
+any(sample_sums(ASV_16S_Phyloseq_M3) == 0)
+any(sample_sums(ASV_16S_Phyloseq_M3) > 0)
+sum(taxa_sums(ASV_16S_Phyloseq_M3) > 0)
+any(sample_sums(ASV_16S_Phyloseq_M3) < 1)
+sum(taxa_sums(ASV_16S_Phyloseq_M3) < 1)
+```
+##Compare sequences per sample or ASV
+```{r Compare sequences per sample or ASV}
+readsumsdf = data.frame(nreads = sort(taxa_sums(ASV_16S_Phyloseq_M3),TRUE), sorted = 1:ntaxa(ASV_16S_Phyloseq_M3), type = "ASV")
+readsumsdf = rbind(readsumsdf,data.frame(nreads = sort(sample_sums(ASV_16S_Phyloseq_M3),TRUE),sorted = 1:nsamples(ASV_16S_Phyloseq_M3), type = "Samples"))
+
+title = "Total number of reads"
+
+p = ggplot(readsumsdf, aes(x = sorted, y = nreads)) +
+  geom_bar(stat = "identity")
+
+p + ggtitle(title) +
+  scale_y_log10() +
+  facet_wrap(~type, 1, scales = "free")
+
+```
+##Check Variables
+```{r What sample variables exist in the phyloseq data}
+sample_variables(ASV_16S_Phyloseq_M3)
+```
+
+```{r Attached ASV ID}
+tax_table(ASV_16S_Phyloseq_M3) <- cbind(tax_table(ASV_16S_Phyloseq_M3), ASV=taxa_names(ASV_16S_Phyloseq_M3))
+```
+##Resubset and check what samples remain after rarefaction
+```{r}
+ASV_16S_Phyloseq_M3_v0 = ASV_16S_Phyloseq_M3
+saveRDS(ASV_16S_Phyloseq_M3_v0, "Corrected_phyloseq.rds")
+```
+
+```{r Import and Subset}
+map_file_M3 <- paste("/Users/fenelladeans/OneDrive/Documents_2017/PhD/2019_Sequencing/2019_Sequencing/", "M3_16S_Map_19_Reduced.txt", sep = "")
+
+bmsd_M3 <- import_qiime_sample_data(map_file_M3)
+bmsd_M3 <- bmsd_M3[!(bmsd_M3$TID=="EBW"),]
+bmsd_M3 <- bmsd_M3[!(bmsd_M3$WorP=="P"),]
+bmsd_M3_Day19 <- bmsd_M3[(bmsd_M3$DayN=="19"),]
+bmsd_M3_Day19
+
+class(bmsd_M3)
+dim(bmsd_M3)
+sample_data(bmsd_M3)
+sample_variables(bmsd_M3)
+
+ASV_16S_Phyloseq_M3
+ASV_16S_Phyloseq_M3_v0
+
+Phyloseq_M3 <- merge_phyloseq(ASV_16S_Phyloseq_M3, bmsd_M3)
+Phyloseq_M3
+sample_data(Phyloseq_M3)
+
+ASV_16S_Phy_M3_D19= subset_samples(ASV_16S_Phyloseq_M3, X.SampleID == "M3xD19x1" | X.SampleID == "M3xD19x3"| X.SampleID == "M3xD19x4"| X.SampleID == "M3xD19x5"| X.SampleID == "M3xD19x6"| X.SampleID == "M3xD19x7")
+Phy_M3_D19 <- merge_phyloseq(ASV_16S_Phy_M3_D19, bmsd_M3_Day19)
+```
+
+```{r Prune}
+###Remove OTUs that aren't present in at least one sample, confirm all taxa > 0
+Phyloseq_M3_rm = prune_taxa(taxa_sums(Phyloseq_M3) > 0, Phyloseq_M3)
+any(taxa_sums(Phyloseq_M3_rm)== 0)
+
+#Attach OTU name as taxonomy
+tax_table(Phyloseq_M3_rm)<-cbind(tax_table(Phyloseq_M3_rm),OTU=taxa_names(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm)
+```
+
+```{r Renaming}
+colnames(tax_table(Phyloseq_M3_rm)) = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species", "ASV", "OTU")
+###Divide counts by 10 and round
+###gsub command to remove extra characters
+
+Phyloseq_M3_10  = transform_sample_counts(Phyloseq_M3_rm, function(x) x / 10) 
+Phyloseq_M3r  = transform_sample_counts(Phyloseq_M3_10, round )
+```
+
+```{r Renaming2}
+colnames(tax_table(Phyloseq_M3_rm)) = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species","ASV", "OTU")
+
+#This step deletes extra characters that indicate the taxonomic level. If you wish to plot class, family, genus, etc, you will need to repeat this step replacing replacing the number with the level you wish to remove. 
+tax_table(Phyloseq_M3_rm) =gsub("D_0__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_1__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_2__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_3__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_4__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_5__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_6__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_7__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_8__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_9__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_10__", "", tax_table(Phyloseq_M3_rm))
+tax_table(Phyloseq_M3_rm) =gsub("D_11__", "", tax_table(Phyloseq_M3_rm))
+
+colnames(tax_table(Phyloseq_M3r)) = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species","ASV", "OTU")
+#This step deletes extra characters that indicate the taxonomic level. If you wish to plot class, family, genus, etc, you will need to repeat this step replacing replacing the number with the level you wish to remove. 
+tax_table(Phyloseq_M3r) =gsub("D_0__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_1__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_2__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_3__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_4__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_5__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_6__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_7__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_8__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_9__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_10__", "", tax_table(Phyloseq_M3r))
+tax_table(Phyloseq_M3r) =gsub("D_11__", "", tax_table(Phyloseq_M3r))
+```
+
+```{r processing}
+otu_table_M3_Rare<-otu_table(Phyloseq_M3_rm)
+write.csv(otu_table_M3_Rare, "/Users/fenelladeans/OneDrive/Documents/PhD/otu_table_M3_Rare.csv")
+Phyloseq_M3_rm
+
+tax_table(Phyloseq_M3_rm)
+myTaxa = names(sort(taxa_sums(Phyloseq_M3_rm), decreasing = TRUE)[1:10])
+myTaxa
+myTaxa = (sort(taxa_sums(Phyloseq_M3_rm), decreasing = TRUE)[1:10])
+
+positions<-c("T2017","T2100","T2150")
+
+TopNOTUs = names(sort(taxa_sums(Phyloseq_M3_rm), TRUE)[1:100])
+ent10 = prune_taxa(TopNOTUs, Phyloseq_M3_rm)
+
+plot_bar(ent10, "TID", fill = "Day", facet_grid = ~Phylum)+theme(plot.title = element_text(size=30, hjust=0)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+plot_bar(Phyloseq_M3_rm, "TID", fill = "Day", facet_grid = ~Phylum)+theme(plot.title = element_text(size=30, hjust=0)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+library(gridExtra)
+
+physeq2Phylum=tax_glom(Phyloseq_M3_rm,"Phylum",NArm=TRUE)
+physeq2PhylumR = transform_sample_counts(physeq2Phylum, function(x) x / sum(x))
+physeq2PhylumR
+otu_table(physeq2PhylumR)
+tax_table(physeq2PhylumR)
+
+
+write.csv(otu_table(physeq2PhylumR), "/Users/fenelladeans/OneDrive/Documents/PhD/otu_table_M3_Phylum.csv")
+Phyloseq_M3_rm
+```
+
+##Phylum colour list
+```{r Phylum colour list}
+Phylum_colour_list_16S = c(
+  Actinobacteria = "red4",
+  Bacteroidetes = "red1",
+  Chloroflexi = "orange",
+  Cyanobacteria = "yellow",
+  Dependentiae = "yellowgreen",
+  Euryarchaeota = "forestgreen", 
+  Firmicutes = "cyan3", 
+  Margulisbacteria = "blue2",
+  Margulisbacteriia = "blue2",
+  "Marinimicrobia_(SAR406_clade)" = "navyblue",
+  "Marinimicrobia (SAR406)" = "navyblue",
+  "Marinimicrobia (SAR406 clade) " = "navyblue", 
+  Patescibacteria = "purple3", 
+  Planctomycetes = "purple", 
+  Proteobacteria = "magenta2",
+  "TM6 (Dependentiae)" = "hotpink",
+  Verrucomicrobia = "thistle2",
+  "Rare Taxa (<1%)" = "black")
+
+Phylum_colour_list_18S = c(
+  Acidobacteria = "rosybrown3",
+  Annelida = "firebrick1",
+  Apicomplexa = "red2",
+  Arthropoda = "firebrick",
+  Ascomycota = "mistyrose1",
+  Basidiomycota = "salmon1",
+  Bicosoecida = "tomato2",
+  Cercozoa = "orangered1",
+  Chlorophyta_ph = "lightsalmon1",
+  Chlorophyta = "lightsalmon1",
+  Choanoflagellida = "sienna2",
+  Ciliophora = "peachpuff1",
+  Cnidaria = "darkorange2",
+  Cryptomonadales = "burlywood3",
+  Ctenophora = "tan2",
+  Dinoflagellata = "orange1",
+  Echinodermata = "goldenrod2",
+  Epsilonbacteraeota = "cornsilk1",
+  Euglenozoa = "lightgoldenrod1",
+  Euryarchaeota = "ivory1",
+  Florideophycidae = "gold2",
+  Ichthyosporea = "lemonchiffon1",
+  Incertae_Sedis = "khaki2",
+  Incertae_Sedis_ph = "khaki4",
+  Jakobida = "lightyellow1",
+  Kathablepharidae = "yellow2",
+  Labyrinthulomycetes = "olivedrab1",
+  "MAST-1" = "chartreuse1",
+  "MAST-12" = "darkseagreen3",
+  "MAST-2" = "green1",
+  "MAST-3" = "palegreen1",
+  "MAST-4" = "seagreen3",
+  "MAST-6" = "aquamarine1",
+  "Mollusca" = "turquoise3",
+  Nematoda = "cyan1",
+  "Ochrophyta" = "darkslategray2",
+  Pav3 = "lightblue1",
+  Peronosporomycetes = "deepskyblue2",
+  Phragmoplastophyta = "skyblue1",
+  Picozoa = "dodgerblue1",
+  Planctomycetes = "navy", 
+  Porifera = "blue1",
+  Protalveolata = "mediumpurple2",
+  Proteobacteria = "purple3",
+  Prymnesiophyceae = "darkorchid2",
+  Rotifera = "magenta",
+  Tunicata = "plum2",
+  Verrucomicrobia = "lightpink", 
+  Vertebrata = "deeppink1",
+  raretaxa = "black",
+  "Rare Taxa (<1%)" = "black",
+  "NA" = "black")
+
+Treatment_shape_list = c("Control" =17, "T2017"=17, "2100 pH"=18, "pH"=18, "T2100" = 15, "2100" = 15, "pH_Temp"=15, "pHxTemp"=15, "T2150" = 8, "2150" = 8)
+
+Treatment_colour_list = c("Control" ="green2", "T2017"="green2", "2100 pH"="deepskyblue", "pH"="deepskyblue", "T2100" = "orange", "2100" = "orange", "pH_Temp"="orange", "pHxTemp"="orange", "T2150" = "darkred", "2150" = "darkred")
+
+Domain_colour_list = c(Archaea = "gray87", Bacteria = "gray48", "No blast hit" = "black")
+```
+
+##Figure 2.2 - Chlorophyll-a and nutrients & ##Figure 2.3 - Bacterial abundance and bacterial production
+
+```{r Mesocosm 3 Nutrient plots setup}
+
+M3_Full_MD <- read.csv("/Users/fenelladeans/OneDrive/Documents_2017/PhD/M3_Full.csv")
+M3_Full_MD <- M3_Full_MD[!(M3_Full_MD$TID=="EBW"),]
+M3_Full_MD
+
+positions_M3 <- c("T2017", "T2100", "T2150")
+
+Sal_label = expression(paste(plain('Salinity') ))
+Acid_label = expression(paste(plain('pH') ))
+Temp_label = expression(paste(plain('Temperature (°C)') ))
+TCHL_label = expression(paste(plain('Chlorophyll-a (μg '), plain('L '^{-1}), plain(')') ))
+DRP_label = expression(paste(plain('Phosphorus (μmol '), plain('L '^{-1}), plain(')') ))
+NH4.N_label = expression(paste(plain('Ammonia (μmol '), plain('L '^{-1}), plain(')') ))
+NO3.N_label = expression(paste(plain('Nitrate (μmol '), plain('L '^{-1}), plain(')') ))
+TDN_label = expression(paste(plain('Total dissolved nitrate (μmol '), plain('L '^{-1}), plain(')') ))
+DRSi_label = expression(paste(plain('Silicate (μmol '), plain('L '^{-1}), plain(')') ))
+DON_label = expression(paste(plain('Dissolved organic nitrogen (μmol '), plain('L '^{-1}), plain(')') ))
+DOC_label = expression(paste(plain('Dissolved organic carbon (μmol '), plain('L '^{-1}), plain(')') ))
+Bact_label = expression(paste(plain('Bacterial numbers (cells '), plain('ml '^{-1}), plain(')') ))
+BACP_label = expression(paste(plain('Bacterial production (μgC '), plain('L '^{-1}), plain('Day '^{-1}), plain(')') ))
+Observed_label = expression(paste(plain('ASV richness') ))
+Shannon_label = expression(paste(plain('Shannon diversity measure') ))
+```
+
+```{r Mesocosm 3 Nutrient plots}
+
+EXO_Temp_Avg_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=EXO_Temp_Avg, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(Temp_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(14,21)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(Temp_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+EXO_Temp_Avg_Plot_M3
+
+
+EXO_pH_Avg_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=EXO_pH_Avg, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab("pH")+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(7.4,8.4)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab("pH")+
+  xlab("Day")+  guides(linetype=FALSE)
+
+EXO_pH_Avg_Plot_M3
+
+TFChla_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=TFChla, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(TCHL_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,5)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(TCHL_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+TFChla_Plot_M3
+TFChla_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=TFChla, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(TCHL_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,5)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(TCHL_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+TFChla_Plot_M3
+
+DOC_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=DOC, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.4, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(DOC_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,1600)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(DOC_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+DOC_Plot_M3
+
+DRP_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=DRP, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(TCHL_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,0.4)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(DRP_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+DRP_Plot_M3
+
+NH4.N_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=NH4.N, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(TCHL_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,1)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(NH4.N_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+NH4.N_Plot_M3
+
+NO3.N_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=NO3.N, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(TCHL_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,1)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(NO3.N_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+NO3.N_Plot_M3
+
+TDN_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=TDN, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(TCHL_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,12)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(TDN_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+TDN_Plot_M3
+
+DRSi_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=DRSi, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(TCHL_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,5)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(DRSi_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+DRSi_Plot_M3
+
+Bact_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=Bact, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(Bact_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,4000000)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(Bact_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+Bact_Plot_M3
+
+Bact_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=Bact, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(Bact_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,4000000)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(Bact_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+Bact_Plot_M3
+
+BACP_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=BACP, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.29, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(BACP_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,15)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(BACP_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+BACP_Plot_M3
+
+head(M3_Full_MD)
+Bact_Plot_M3 <- ggplot(M3_Full_MD, aes(x=DayN, y=Bact, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.25, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(Bact_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,4000000)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(Bact_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+Bact_Plot_M3
+```
+
+##Figure 2.4 - Alpha diversity
+
+```{r Shannon 1}
+###Calculate and plot observed species and shannon by treatment and time point (WORKS)
+positions<-c("T2017","T2100","T2150")
+richness_M3 <- estimate_richness(Phyloseq_M3r, split = TRUE, measures = NULL)
+richness_M3
+write.csv(richness_M3, file="/Users/fenelladeans/OneDrive/Documents_2017/PhD/2019_Sequencing/Richness_M3.csv")
+getwd()
+```
+
+```{r Shannon 3}
+###Calculate and add observed species and shannon to metadata
+rich = estimate_richness(Phyloseq_M3r, measures = c("Observed", "Shannon"))
+rich = data.frame(rich, SampleID = sample_names(Phyloseq_M3r))
+rich_map = data.frame(bmsd_M3)
+
+rich_meta_M3 = merge(rich, rich_map, by.x = "SampleID", by.y = "X.SampleID") 
+rich_meta_M3
+```
+
+```{r Shannon Plots}
+
+X16S_Observed_Plot_M3 <- ggplot(M3_Full_MD_N, aes(x=DayN, y=X16S_Observed, group=TID))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.5, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(X16S_Observed_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(0,250)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(X16S_Observed_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+X16S_Observed_Plot_M3
+
+Observed_Plot_M3 <- X16S_Observed_Plot_M3
+
+X16S_Shannon_Plot_M3 <- ggplot(M3_Full_MD_N, aes(x=DayN, y=X16S_Shannon, group=TID, filter(DayN != 0)))+
+  geom_smooth(aes(colour=TID, fill=TID),position=pd, span=0.5, se=FALSE)+
+  geom_point(aes(colour=TID),position=pd, size=2, shape=16)+
+  ylab(X16S_Shannon_label)+
+  xlab("Day")+expand_limits(y=0)+scale_y_continuous()+
+  theme_bw()+
+  ylim(2,5)+ xlim(-0.5,22)+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  scale_colour_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+
+  scale_fill_manual("Treatment",limits=positions_M3,labels=c("Control", "2100", "2150"), values=c("T2017"="green2","T2150"="red","T2100"="orange", "EBW"="black"))+ 
+  theme(plot.title = element_text(size=18, hjust=0.5)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+  ylab(X16S_Shannon_label)+
+  xlab("Day")+  guides(linetype=FALSE)
+
+X16S_Shannon_Plot_M3
+
+Shannon_Plot_M3 <- X16S_Shannon_Plot_M3
+```
+
+```{r Kruskal Test}
+
+kruskal.test(Observed ~ TID, data = rich_meta_M3) 
+kruskal.test(Shannon ~ TID, data = rich_meta_M3) 
+##repeat for other categorical variables
+
+kruskal.test(Observed ~ MID, data = rich_meta_M3)
+kruskal.test(Shannon ~ MID, data = rich_meta_M3)
+##repeat for other categorical variables
+
+```
+
+##Figure 2.5 - NMDS
+
+```{r NMDS Bray Curtis}
+positions<-c("T2017","T2100","T2150")
+
+Phyloseq_M3_NMDS
+summary(Phyloseq_M3_NMDS)
+stressplot(Phyloseq_M3_NMDS)
+
+Phyloseq_M3_NMDS = ordinate(Phyloseq_M3r, "NMDS", "bray") #warning
+NMDS_M3_Day_blue = plot_ordination(Phyloseq_M3r, Phyloseq_M3_NMDS, color = "DayN", shape = "TID") + theme_few() + theme(text = element_text(size=25), axis.text.x = element_text(angle = 90, hjust = 1)) + scale_color_gradient(low = "gray80", high = "midnightblue", limits=c(0,22)) + geom_point(size = 5) + labs(colour = "Day", shape="Treatment") + scale_shape_discrete(limits=positions, labels=c("Control", "2100", "2150")) 
+
+NMDS_M3_Day_blue
+
+Phyloseq_M3_NMDS = ordinate(Phyloseq_M3r, "NMDS", "bray") #warning
+NMDS_M3_Day_black = plot_ordination(Phyloseq_M3r, Phyloseq_M3_NMDS, color = "DayN", shape = "TID") + theme_few() + theme(text = element_text(size=25), axis.text.x = element_text(angle = 90, hjust = 1)) + scale_color_gradient(low = "gray80", high = "black", limits=c(0,22)) + geom_point(size = 5) + labs(colour = "Day", shape="Treatment") + scale_shape_discrete(limits=positions, labels=c("Control", "2100", "2150")) 
+
+NMDS_M3_Day_black
+
+NMDS_M3_Chla_black = plot_ordination(Phyloseq_M3r, Phyloseq_M3_NMDS, color = "TCHL", shape = "TID") + theme_few() + theme(text = element_text(size=25), axis.text.x = element_text(angle = 90, hjust = 1)) + scale_color_gradient(low = "gray95", high = "black", limits=c(0,4)) + geom_point(size = 5) + labs(colour = "TCHL", shape="Treatment") + scale_shape_discrete(limits=positions, labels=c("Control", "2100", "2150")) 
+
+NMDS_M3_Chla_black
+```
+
+```{r Bray Curtis PERMANOVAs}
+bray_M3
+bray_M3 <- phyloseq::distance(Phyloseq_M3r, method="bray") 
+sampledf <- data.frame(sample_data(Phyloseq_M3r))
+sampledf <- data.frame(sample_data(Phyloseq_M3_rm))
+
+sampledf_TCHL
+options(max.print=5000)
+getOption("max.print")
+
+adonis(bray_M3 ~ TID, data=sampledf)
+adonis(bray_M3 ~ DayN, data=sampledf)
+options(na.action = na.omit)
+adonis(bray_M3 ~ as.numeric(TCHL), data=sampledf) 
+adonis(bray_M3 ~ TCHL, data=sampledf) 
+adonis(bray_M3 ~ sampledf$TCHL)
+adonis(bray_M3 ~ Bact, data=sampledf) 
+adonis(bray_M3 ~ BACP, data=sampledf) 
+adonis(bray_M3 ~ Acidity, data=sampledf) 
+adonis(bray_M3 ~ Temperature, data=sampledf) 
+
+adonis(bray_M3 ~ N2O, data=sampledf) 
+adonis(bray_M3 ~ CH4, data=sampledf) 
+adonis(bray_M3 ~ NanoEuc, data=sampledf) 
+adonis(bray_M3 ~ PicoPro, data=sampledf) 
+adonis(bray_M3 ~ PicoEuc, data=sampledf) 
+
+adonis(bray_M3 ~ DOC, data=sampledf) 
+adonis(bray_M3 ~ DRP, data=sampledf)
+adonis(bray_M3 ~ NH4.N, data=sampledf) 
+adonis(bray_M3 ~ NO3.N, data=sampledf) 
+adonis(bray_M3 ~ TDN, data=sampledf) 
+adonis(bray_M3 ~ DRSi, data=sampledf) 
+adonis(bray_M3 ~ PN, data=sampledf) 
+adonis(bray_M3 ~ NH4.N, data=sampledf) 
+
+
+Phyloseq_M3_BetaD = betadisper(bray_M3,sampledf$TID)
+permutest(Phyloseq_M3_BetaD) 
+
+Phyloseq_M3_BetaD = betadisper(bray_M3,sampledf$DayN)
+permutest(Phyloseq_M3_BetaD) 
+
+Phyloseq_M3_BetaD = betadisper(bray_M3,sampledf$Temperature)
+permutest(Phyloseq_M3_BetaD) 
+
+Phyloseq_M3_BetaD = betadisper(bray_M3,sampledf$Acidity)
+permutest(Phyloseq_M3_BetaD) 
+
+Phyloseq_M3_BetaD = betadisper(bray_M3,sampledf$TCHL)
+permutest(Phyloseq_M3_BetaD) 
+
+Phyloseq_M3_BetaD = betadisper(bray_M3,sampledf$Bact)
+permutest(Phyloseq_M3_BetaD) 
+
+Phyloseq_M3_BetaD = betadisper(bray_M3,sampledf$BACP)
+permutest(Phyloseq_M3_BetaD) 
+
+bray_M3 <- phyloseq::distance(Phyloseq_M3_rm, method="bray") 
+sampledf <- data.frame(sample_data(Phyloseq_M3_rm))
+
+
+```
+
+```{r ANOSIM}
+Day_group_M3 = get_variable(Phyloseq_M3r, "Day")
+Day_ano_M3 = anosim(phyloseq::distance(Phyloseq_M3r, "bray"), Day_group_M3)
+Day_ano_M3$signif
+summary(Day_ano_M3) 
+
+TID_group_M3 = get_variable(Phyloseq_M3r, "TID")
+TID_ano_M3 = anosim(phyloseq::distance(Phyloseq_M3r, "bray"), TID_group_M3)
+TID_ano_M3$signif
+summary(TID_ano_M3) 
+```
+
+##Figure 2.6 - Mean relative abundance of phyla
+
+```{r edgeR stuff}
+phyloseq_to_edgeR = function(physeq, group, method = "RLE", ...) {
+  require("edgeR")
+  require("phyloseq")
+  # Enforce orientation.
+  if (!taxa_are_rows(physeq)) {
+    physeq <- t(physeq)
+  }
+  x = as(otu_table(physeq), "matrix")
+  # Add one to protect against overflow, log(0) issues.
+  x = x + 1
+  # Check `group` argument
+  if (identical(all.equal(length(group), 1), TRUE) & nsamples(physeq) > 1) {
+    # Assume that group was a sample variable name (must be categorical)
+    group = get_variable(physeq, group)
+  }
+  # Define gene annotations (`genes`) as tax_table
+  taxonomy = tax_table(physeq, errorIfNULL=FALSE)
+  if( !is.null(taxonomy) ){
+    taxonomy = data.frame(as(taxonomy, "matrix"))
+  } 
+  # Now turn into a DGEList
+  y = DGEList(counts = x, group = group, genes = taxonomy, remove.zeros = TRUE, 
+              ...)
+  # Calculate the normalization factors
+  z = calcNormFactors(y, method = method)
+  # Check for division by zero inside `calcNormFactors`
+  if (!all(is.finite(z$samples$norm.factors))) {
+    stop("Something wrong with edgeR::calcNormFactors on this data,\n         non-finite $norm.factors, consider changing `method` argument")
+  }
+  # Estimate dispersions
+  return(estimateTagwiseDisp(estimateCommonDisp(z)))
+}
+```
+
+```{r Set up phyla level}
+positions_M3 <- c("T2017", "T2100", "T2150")
+
+my_phylum_phyloseq = Phyloseq_M3_rm%>% #Identify the original subsetted phyloseq object
+  tax_glom("Phylum") %>% #Merge species with the same Genus.
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% #Convert the absolute count to a percentage count
+  psmelt() %>% #Adjust the data from a phyloseq object into a data.frame-class table  
+  filter(Abundance > 0.01)   %>% #Remove samples that make up less than one percent of the abundance.
+  arrange(Phylum)#Arange the samples by genus.
+```
+
+```{r Plot phyla level}
+Plot_location_Phyla_M3 = ggplot(my_phylum_phyloseq,
+                          aes(x=as.factor(TID),
+                              y=Abundance,
+                              fill=Phylum)) +
+  geom_bar(stat = "identity", 
+           position = "fill") +
+  scale_y_continuous(labels = percent_format()) +
+  xlab("Treatment")+
+  ylab("Relative abundance (%)")+ scale_fill_manual("Phylum", values=Phylum_colour_list, labels = c("Actinobacteria", "Bacteroidetes", "Cyanobacteria",  "Euryarchaeota", "Margulisbacteriia", "Marinimicrobia (SAR406 clade)", "Planctomycetes", "Proteobacteria", "Verrucomicrobia"))+scale_x_discrete(limits=positions_M3, labels=c("Control", "2100", "2150"))
+Plot_location_Phyla_M3
+
+Plot_location_Phyla_Day_M3 = ggplot(my_phylum_phyloseq,
+                          aes(x=as.factor(DayN),
+                              y=Abundance,
+                              fill=Phylum)) +
+  geom_bar(stat = "identity", 
+           position = "fill") +
+  scale_y_continuous(labels = percent_format()) +
+  xlab("Day")+
+  ylab("Relative abundance (%)")+scale_fill_manual("Phylum", values=Phylum_colour_list, labels = c("Actinobacteria", "Bacteroidetes", "Cyanobacteria", "Euryarchaeota", "Margulisbacteriia", "Marinimicrobia (SAR406 clade)", "Planctomycetes", "Proteobacteria",  "Verrucomicrobia"))
+Plot_location_Phyla_Day_M3
+
+Plot_location_Phyla_Day_Trt_M3 = ggplot(my_phylum_phyloseq,
+                          aes(x=as.factor(TID),
+                              y=Abundance,
+                              fill=Phylum, facet_grid(~Day))) +
+  geom_bar(stat = "identity", 
+           position = "fill") +
+  scale_y_continuous(labels = percent_format()) +
+  xlab("Day")+
+  ylab("Relative abundance (%)")+scale_fill_manual("Phylum", values=Phylum_colour_list, labels = c("Actinobacteria", "Bacteroidetes", "Cyanobacteria",  "Euryarchaeota", "Margulisbacteriia", "Marinimicrobia (SAR406 clade)", "Planctomycetes", "Proteobacteria",  "Verrucomicrobia"))+ scale_x_discrete(limits=positions, labels=c("Control", "2100", "2150"))
+Plot_location_Phyla_Day_Trt_M3+facet_grid(~Day)
+
+layout <- '
+A
+B
+'
+
+Plot_location_Domain_M3 + theme(plot.title = element_text(size=18, hjust=0.5)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + Plot_location_Domain_M3 + plot_layout(design = layout) + theme(plot.title = element_text(size=18, hjust=0.5)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+##Figure 2.7 - Mean relative abundance of phyla over time
+
+```{r Set up Day }
+
+dge_EdgeR_obj_Day_prok = phyloseq_to_edgeR(Phyloseq_M3r, group = "DayN")
+# Perform binary test
+et_EdgeR_Day_prok = exactTest(dge_EdgeR_obj_Day_prok)
+# Extract values from test results
+tt_EdgeR_Day_prok = topTags(et_EdgeR_Day_prok, n = nrow(dge_EdgeR_obj_Day_prok$table), adjust.method = "BH", sort.by = "PValue")
+res_EdgeR_Day_prok = tt_EdgeR_Day_prok@.Data[[1]]
+sigtab_2fold_EdgeR_Day_prok<- subset(res_EdgeR_Day_prok, PValue < 0.05 & logFC >= 2 | PValue < 0.05 & logFC <= -2)
+#Keep only FDR corrected <.1
+sigtab_2fold_FDR_Day_prok  <- subset(sigtab_2fold_EdgeR_Day_prok , FDR < 0.1)
+keepTaxa_FDR_Day_prok  <- sigtab_2fold_EdgeR_Day_prok$Genus #Extract the OTU table that was shown to be significant
+Twofold_FDR_Day_prok  <- subset_taxa(Phyloseq_M3r , Genus %in% keepTaxa_FDR_Day_prok) #Subset the taxa by the OTUs that were shown to change significantly
+dat_2fold_FDR_Day_Phylum_prok  <- tax_glom(Twofold_FDR_Day_prok, taxrank = 'Phylum') %>%#Merge the species at the Phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% #Extract abundance data from phyloseq object
+  psmelt() #Melt it into a dataframe
+dat_2fold_FDR_Day_Phylum_prok  <- dat_2fold_FDR_Day_Phylum_prok [order(dat_2fold_FDR_Day_Phylum_prok$Phylum),] #Order them at the Phylum level
+dat_2fold_FDR_Day_Phylum_prok$Phylum <- as.character(dat_2fold_FDR_Day_Phylum_prok$Phylum)
+  # group dataframe by Phylum, calculate relative abundance
+medians_Day_Phylum_prok <- ddply(dat_2fold_FDR_Day_Phylum_prok, ~Phylum, function(x) c(median=mean(x$Abundance)))
+  # find Phylum whose rel. abund. is less than 1%
+remainder_Day_Phylum_prok <- medians_Day_Phylum_prok[medians_Day_Phylum_prok$median <= 0.01,]$Phylum
+  # change their name to "Remainder"
+dat_2fold_FDR_Day_Phylum_prok[dat_2fold_FDR_Day_Phylum_prok$Phylum %in% remainder_Day_Phylum_prok,]$Phylum <- 'RareTaxa'
+Summary_Day_Phylum_prok <- summarySE(dat_2fold_FDR_Day_Phylum_prok, measurevar="Abundance", groupvars=c("Phylum", "DayN"))
+Summary_Day_Phylum_prok
+ 
+Summary_Day_Phylum_prok<-dplyr::arrange(Summary_Day_Phylum_prok,Phylum, Abundance)
+Summary_Day_Phylum_prok$Phylum <- factor(Summary_Day_Phylum_prok$Phylum,
+                         levels=(unique(Summary_Day_Phylum_prok$Phylum)))
+```
+
+```{r levels renaming}
+#Check for weird names and make Rare taxa name better.
+levels(Summary_Day_Phylum_prok$Phylum)
+#Rename levels
+levels(Summary_Day_Phylum_prok$Phylum) = c("Bacteroidetes","Cyanobacteria",  "Proteobacteria","Rare Taxa (<1%)")
+#Check to make sure it worked
+levels(Summary_Day_Phylum_prok$Phylum) 
+#Save as table for ease of reading.
+write.csv(Summary_Day_Phylum_prok, file = "M3_ordered_summary_Day_Phylumlvl_prok.csv")
+```
+
+```{r Plot Day}
+Summary_Day_Phylum_prok
+Summary_plot_Day_Phylum_prok_M3 <-ggplot(Summary_Day_Phylum_prok, 
+                        aes(x=as.numeric(as.character(DayN)), 
+                            y=Abundance*100, 
+                            colour=Phylum))+ 
+  geom_line(stat = "identity", size=1) + 
+  geom_errorbar(aes(ymin=(Abundance-se)*100, 
+                    ymax=(Abundance+se)*100), 
+                width=.2 
+                #position=pd
+                )+
+  theme_bw()+
+  theme(legend.position = "right", 
+        strip.background = element_blank())+
+  xlab("Day")+
+  ylab("Mean relative abundance")+
+  scale_colour_manual("Phylum", values = Phylum_colour_list)
+Summary_plot_Day_Phylum_prok_M3+theme(plot.title = element_text(size=18, hjust=0.5)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+##Figure 2.8 - Genera with the highest relative abundance
+
+```{r  Genus plots B }
+positions<-c("T2017","T2100","T2150")
+my_Genus_phyloseq_M3 = Phyloseq_M3_rm %>% #Identify the original subsetted phyloseq object
+  tax_glom("Genus") %>% #Merge species with the same Phylum
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% #Convert the absolute count to a percentage count
+  psmelt() %>% #Adjust the data from a phyloseq object into a data.frame-class table  
+  filter(Abundance > 0.01)   %>% #Remove samples that make up less than one percent of the abundance.
+  arrange(desc(Abundance)) %>% #Arange the samples by Phylum
+  mutate(order = row_number("Abundance"))
+
+my_Genus_phyloseq_M3
+Plot_Genus_M3_B = ggplot(my_Genus_phyloseq_M3, aes(x=as.factor(TID), y=Abundance, fill=Genus)) + geom_bar(stat = "identity", position = "fill") + scale_y_continuous(labels = percent_format()) + xlab("Treatment")+ ylab("Relative abundance (%)")
+Plot_Genus_M3_B
+
+Plot_Genus_M3_phylum = ggplot(my_Genus_phyloseq_M3, aes(x=as.factor(TID), y=fct_reorder(Genus, Abundance), size=Abundance, color=Phylum)) + geom_point(stat = "identity")+ ylab("Genus") + xlab("Treatment")+ scale_x_discrete(limits=positions, labels=c("Control", "2100", "2150"))+ scale_colour_manual("Phylum", values=Phylum_colour_list_16S)+scale_size_continuous("Abundance", limits = c(0.001, 0.7))
+Plot_Genus_M3_phylum
+Plot_Genus_M3_phylum +theme(plot.title = element_text(size=18, hjust=0.5)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))+ scale_x_discrete(limits=positions, labels=c("Control", "2100", "2150")) +scale_size_continuous("Abundance", limits = c(0.001, 0.7))
+
+Plot_Genus_M3_phylum <- Plot_Genus_M3_phylum +theme(plot.title = element_text(size=18, hjust=0.5)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))+ scale_x_discrete(limits=positions, labels=c("Control", "2100", "2150"))
+
+Plot_Genus_M3_phylum
+Plot_Genus_M1_phylum + Plot_Genus_M3_phylum
+
+head(my_Genus_phyloseq)
+aov_test <- aov(Abundance ~ TID, data=my_Genus_phyloseq)
+summary(aov_test)
+
+kruskal.test(Abundance ~ TID, data=my_Genus_phyloseq)
+
+kruskal.test(Abundance ~ Genus, data=my_Genus_phyloseq)
+dunnTest(Abundance ~ Genus, data=my_Genus_phyloseq) #
+my_Genus_phyloseq
+
+
+write.csv(my_Genus_phyloseq,"/Users/fenelladeans/OneDrive/Documents/PhD\\M3_Genus.csv", row.names = FALSE)
+
+write.csv(my_Genus_phyloseq, file = "M3_Genus.csv", row.names = FALSE)
+
+
+Abundance <- my_Genus_phyloseq$Abundance
+Abundance$"Escherichia/Shigella"
+
+
+genus_only <- subset_taxa(Phyloseq_M3_rm, Genus=="Escherichia/Shigella")
+single_genus = genus_only %>% #Identify the original subsetted phyloseq object
+  tax_glom("Genus") %>% #Merge species with the same Phylum
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% #Convert the absolute count to a percentage count
+  psmelt() %>% #Adjust the data from a phyloseq object into a data.frame-class table  
+  filter(Abundance > 0.001)   %>% #Remove samples that make up less than one percent of the abundance.
+  arrange(Genus)#Arange the samples by Phylum
+head(single_genus)
+single_genus
+aov_test <- aov(Abundance ~ TID, data=single_genus)
+summary(aov_test)
+kruskal.test(Abundance ~ TID, data=single_genus)
+dunnTest(Abundance ~ TID, data=single_genus) #
+
+```
+
+```{r Genus plots B version 2}
+
+positions<-c("T2017","T2100","T2150")
+my_Genus_phyloseq_M3 = Phyloseq_M3_rm %>% #Identify the original subsetted phyloseq object
+  tax_glom("Genus") %>% #Merge species with the same Phylum
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% #Convert the absolute count to a percentage count
+  psmelt() %>% #Adjust the data from a phyloseq object into a data.frame-class table  
+  filter(Abundance > 0.005)   %>% #Remove samples that make up less than one percent of the abundance.
+  arrange(desc(Abundance)) %>% #Arange the samples by Phylum
+  mutate(order = row_number("Abundance"))
+
+Plot_Genus_M3_phylum = ggplot(my_Genus_phyloseq_M3, aes(x=as.factor(TID), y=fct_reorder(Genus,Abundance), size=Abundance, color=Phylum)) + geom_point(stat = "identity") + ylab("Genus") + xlab("Treatment") + scale_x_discrete(limits=positions, labels=c("Control", "2100", "2150"))+ scale_colour_manual("Phylum", values=Phylum_colour_list) +scale_size_continuous("Abundance", limits = c(0.001, 0.7))
+
+
+Plot_Genus_M3_phylum +theme(plot.title = element_text(size=18, hjust=0.5)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))+ scale_x_discrete(limits=positions)+ scale_x_discrete(limits=positions, labels=c("Control", "2100 pH", "2100"))
+
+Plot_Genus_M3_phylum <- Plot_Genus_M3_phylum +theme(plot.title = element_text(size=18, hjust=0.5)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))+ scale_x_discrete(limits=positions)+ scale_x_discrete(limits=positions, labels=c("Control", "2100 pH", "2100"))
+
+Plot_Genus_M3_phylum
+
+```
+
+##GAMMs
+
+```{r GAMMS}
+library(mgcv)
+library(itsadug)
+
+meso <- read.csv("Mesocosm_2.csv")
+meso
+str(meso)
+Control.col = "green"
+A.col = "orange"
+#B.col = "red"
+Treatment.colour <- as.numeric(meso$TID)
+Treatment.colour[Treatment.colour == 1]<- "green"
+Treatment.colour[Treatment.colour == 2]<- "orange"
+Treatment.colour[Treatment.colour == 3]<- "red"
+Treatment.colour <- as.factor(Treatment.colour)
+
+phases.df <- read.csv('~/OneDrive/Documents/PhD/Phases.csv', header = TRUE)
+head(phases.df)
+
+expt <- "ME02"
+treatment <- c("Control","pH", "pH_Temp")
+p.levels <- c("P1","P2","P3")
+meso$Bag <- meso$Rep + 0*(meso$TID == treatment[1]) + 3*(meso$TID == treatment[2]) + 6*(meso$TID == treatment[3])
+
+## Set correct phases for ME experiment
+
+P1.days <- phases.df[,1][phases.df[,3]=="P1"]
+P2.days <- phases.df[,1][phases.df[,3]=="P2"]
+P3.days <- phases.df[,1][phases.df[,3]=="P3"]
+
+summ.out <- list()
+AIC.out <- list()
+for(k in 8:(length(colnames(meso))-1)){
+  idx = !is.na(meso[,k]) 
+  meso.1 = meso[idx,]
+  y <- meso.1[,k]
+
+  ofTID <- ordered(meso.1$TID, levels = c("Control","pH"))
+
+  ks <- vector("numeric", length = 3)
+  for(j in 1:3){
+    ks[j] <- length(unique(meso.1$DayN[meso.1$Rep==j]))
+  }
+  myk <- min(ks)
+
+
+  m.ar1 <- bam(y ~ s(DayN, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = meso.1)																## Null model - Global Smooth, no separate smooths by treatment
+  m.ar2 <- bam(y ~ s(DayN, by = TID, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = meso.1)												## Individual smooths for each treatment - each treatment has its own wiggly line
+  m.ar3 <- bam(y ~ s(DayN, k = myk) + s(DayN, by = TID, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = meso.1)								## Single global smooth, Individual smooths for each treatment
+
+  mod.list <-list(m.ar1, m.ar2, m.ar3)
+  mAIC <- as.data.frame(AIC(m.ar1, m.ar2, m.ar3)) 
+  myModel <- which(mAIC[,2]==min(mAIC[-1,2]))
+  AIC.out[[k-7]] <- as.data.frame(cbind(mAIC, rep(colnames(meso.1)[k], times = 3)))
+  summary(m.ar2)
+  anova(m.ar1,m.ar2,m.ar3)
+ 
+  x <- c(max(P1.days)-((max(P1.days)-0)/2), max(P2.days)-((max(P2.days)-max(P1.days))/2), max(P3.days)-((max(P3.days)-max(P2.days))/2))
+
+  png(paste("GAMM_", colnames(meso.1)[k], "_", expt, ".png", sep = ""), res = 300, width = 170, height = 127.5, units = "mm", pointsize = 12)
+  par(mfrow=c(1, 1), mar=c(5, 4, 2, 2)+0.1)
+  plot(NA, xlim = c(0,24), ylim = c(min(meso.1[,k]-(0.2*meso.1[,k])),max(meso.1[,k])+(0.2*max(meso.1[,k]))), xlab = "Day", ylab = "Response", main = colnames(meso.1)[k], xaxs = "i")  
+  p1 <- plot_smooth(mod.list[[myModel]], n.grid=181, view="DayN", cond=list(TID=treatment[1]), rug=FALSE, col=Control.col, add=TRUE)
+  p2 <- plot_smooth(mod.list[[myModel]], n.grid=181, view="DayN", cond=list(TID=treatment[2]), rug=FALSE, col=A.col, add=TRUE )
+  #p3 <- plot_smooth(mod.list[[myModel]], n.grid=181, view="DayN", cond=list(TID=treatment[3]), rug=FALSE, col=B.col, add=TRUE )
+  points(meso$DayN, meso[,k], col = levels(Treatment.colour)[Treatment.colour], pch=1, cex = 0.5)
+  legend("topright", lty = 1, col = levels(Treatment.colour), legend = treatment, bty = "n", cex = 0.83)
+  abline(v = max(P1.days))
+  abline(v = max(P2.days))
+  text(x, rep((max(meso.1[,k])+(0.2*max(meso.1[,k]))), times = 3), labels = p.levels)
+  graphics.off()
+  
+  png(paste("diff_GAMM_", colnames(meso.1)[k], "_", expt, ".png", sep = ""), res = 300, width = 170, height = 127.5, units = "mm", pointsize = 12)
+  par(mfrow=c(1, 1), mar=c(5, 4, 2, 2)+0.1)
+  plot(NA, xlim = c(0,24), ylim = c((max(meso.1[,k]-(0.2*meso.1[,k]))*-1),max(meso.1[,k])+(0.2*max(meso.1[,k]))), xlab = "Day", ylab = "Response", main = colnames(meso.1)[k], xaxs = "i")  
+  plot_diff(mod.list[[myModel]], view = "DayN", n.grid=181, comp = list(TID = c(treatment[1],treatment[2])), add = T, col = A.col, col.diff = A.col)
+  #plot_diff(mod.list[[myModel]], view = "DayN", n.grid=181, comp = list(TID = c(treatment[1],treatment[3])), add = T, col = B.col, col.diff = B.col)
+  legend("topright", lty = 1, col = levels(Treatment.colour)[-1], legend = treatment[-1], bty = "n", cex = 0.83)
+  abline(v = max(P1.days))
+  abline(v = max(P2.days))
+  abline(h = 0, lty = 2)
+  text(x, rep((max(meso.1[,k])+(0.2*max(meso.1[,k]))), times = 3), labels = p.levels)
+  graphics.off()
+
+  m.ar2a <- bam(y ~ ofTID + s(DayN, by = ofTID, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = meso.1)
+  m.ar3a <- bam(y ~ ofTID + s(DayN, k = myk) + s(DayN, by = ofTID, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = meso.1)
+
+  summary(m.ar3a)
+  
+  mod.lista <-list(m.ar2a, m.ar3a)
+   
+  summ.out[[k-7]] <- as.data.frame(cbind(summary(mod.lista[[myModel-1]])$s.table, rep(colnames(meso.1)[k], times = length(summary(mod.lista[[myModel-1]])$s.table[,1]))))
+  }
+
+AIC.out
+AIC.output <- AIC.out[[1]]
+for(i in 2:length(AIC.out)){
+AIC.output <- rbind(AIC.output, AIC.out[[i]])
+}
+
+write.csv(AIC.output, "GAMMs_AIC.csv")
+
+summ.out
+summ.output <- summ.out[[1]]
+for(i in 2:length(summ.out)){
+summ.output <- rbind(summ.output, summ.out[[i]])
+}
+
+write.csv(summ.output, "GAMMs_Summ.csv")
+```
+
+```{r GAMM M3 Diversity}
+## Set working directory, input files will be looked for by R in this folder and output files will be created here
+library(mgcv)
+library(itsadug)
+
+positions_M3 <- c("T2017", "T2100", "T2150")
+Ch2_M3_GAMM <- read.csv("~/OneDrive/Documents_2017/PhD/Meso2_16S_ASV/Ch2_Richness_M3_GAMM.csv", header = TRUE)
+
+Ch2_M3_GAMM <- Ch2_M3_GAMM[!(Ch2_M3_GAMM$TID=="EBW"),]
+
+head(Ch2_M3_GAMM)
+
+Ch2_meso_3 <- Ch2_M3_GAMM
+head(Ch2_meso_3)
+
+Ch2_meso_3
+
+## Set colour system for graphing
+Ch2_meso_3$TID <- as.factor(Ch2_meso_3$TID)
+Ch2_meso_3
+str(Ch2_meso_3)
+Control.col = "green2"
+A.col = "orange"
+B.col = "red"
+Treatment.colour <- as.numeric(Ch2_meso_3$TID)
+Treatment.colour[Treatment.colour == 1]<- "green2"
+Treatment.colour[Treatment.colour == 2]<- "orange"
+Treatment.colour[Treatment.colour == 3]<- "red"
+Treatment.colour <- as.factor(Treatment.colour)
+
+phases.df <- read.csv('~/OneDrive/Documents_2017/PhD/Phases.csv', header = TRUE)
+
+expt <- "ME03"
+treatment <- c("T2017","T2100", "T2150")
+p.levels <- c("P1","P2","P3")
+Ch2_meso_3$Bag <- Ch2_meso_3$Rep + 0*(Ch2_meso_3$TID == treatment[1]) + 3*(Ch2_meso_3$TID == treatment[2]) + 6*(Ch2_meso_3$TID == treatment[3])
+#uses rep and TID to determine individual numbering for each mesocosm bag
+
+Ch2_meso_3
+
+
+## Set correct phases for ME experiment, each experiment had phases set at different days based off of changes in biomass, the second column identifier should match with the column for the correct experiment in the Phases spreadsheet.
+
+P1.days <- phases.df[,1][phases.df[,3]=="P1"]
+P2.days <- phases.df[,1][phases.df[,3]=="P2"]
+P3.days <- phases.df[,1][phases.df[,3]=="P3"]
+
+## The next loop does the bulk of the work (AIC analysis, GAMMs and difference GAMM's using ordered factors) and creates the graphical and statistical output
+summ.out.F <- list()
+AIC.out.F <- list()
+for(k in 8:(length(colnames(Ch2_meso_3))-1)){
+    ## this section trims data of  "NA" values
+  idx = !is.na(Ch2_meso_3[,k]) 
+  Ch2_meso_3.1 = Ch2_meso_3[idx,]
+  y <- Ch2_meso_3.1[,k]
+
+  ofTID <- ordered(Ch2_meso_3.1$TID, levels = c("T2017","T2100", "T2150")) # Sets ordered factor variable
+
+  ## this section determines the minimum 'k' value (number of basis sets) required for the GAMM to fit the data
+
+  ks <- vector("numeric", length = 3)
+  for(j in 1:3){
+    ks[j] <- length(unique(Ch2_meso_3.1$DayN[Ch2_meso_3.1$Rep==j]))
+  }
+  myk <- min(ks)
+## This section determines the different GAMMs (we have an AR1 correlations structure to account for repeated measures and we are treating each bag as a random effect)
+
+  m.ar1 <- bam(y ~ s(DayN, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = Ch2_meso_3.1)
+  ## Null model - Global Smooth, no separate smooths by treatment
+  m.ar2 <- bam(y ~ s(DayN, by = TID, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = Ch2_meso_3.1)	
+  ## Individual smooths for each treatment - each treatment has its own wiggly line
+  m.ar3 <- bam(y ~ s(DayN, k = myk) + s(DayN, by = TID, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = Ch2_meso_3.1)					
+  ## Single global smooth, Individual smooths for each treatment
+
+    ## This section determines the AIC of each model fot to the data and records it for output
+  mod.list <-list(m.ar1, m.ar2, m.ar3)
+  mAIC <- as.data.frame(AIC(m.ar1, m.ar2, m.ar3)) 
+  myModel <- which(mAIC[,2]==min(mAIC[-1,2]))
+  AIC.out.F[[k-7]] <- as.data.frame(cbind(mAIC, rep(colnames(Ch2_meso_3.1)[k], times = 3)))
+  summary(m.ar2)
+  anova(m.ar1,m.ar2,m.ar3)
+ 
+  x <- c(max(P1.days)-((max(P1.days)-0)/2), max(P2.days)-((max(P2.days)-max(P1.days))/2), max(P3.days)-((max(P3.days)-max(P2.days))/2)) # determines the x axis postion for graphing phase labels
+  
+  ## This section plots the GAMM of the model with the lowest AIC
+  png(paste("GAMM_", colnames(Ch2_meso_3.1)[k], "_", expt, ".png", sep = ""), res = 300, width = 170, height = 127.5, units = "mm", pointsize = 12)
+  par(mfrow=c(1, 1), mar=c(5, 4, 2, 2)+0.1)
+  plot(NA, xlim = c(0,24), ylim = c(min(Ch2_meso_3.1[,k]-(0.2*Ch2_meso_3.1[,k])),max(Ch2_meso_3.1[,k])+(0.2*max(Ch2_meso_3.1[,k]))), xlab = "Day", ylab = "Response", main = colnames(Ch2_meso_3.1)[k], xaxs = "i")  
+  p1 <- plot_smooth(mod.list[[myModel]], n.grid=181, view="DayN", cond=list(TID=treatment[1]), rug=FALSE, col=Control.col, add=TRUE)
+  p2 <- plot_smooth(mod.list[[myModel]], n.grid=181, view="DayN", cond=list(TID=treatment[2]), rug=FALSE, col=A.col, add=TRUE )
+  p3 <- plot_smooth(mod.list[[myModel]], n.grid=181, view="DayN", cond=list(TID=treatment[3]), rug=FALSE, col=B.col, add=TRUE )
+  points(Ch2_meso_3$DayN, Ch2_meso_3[,k], col = levels(Treatment.colour)[Treatment.colour], pch=1, cex = 0.5)
+  legend("topright", lty = 1, col = levels(Treatment.colour), legend = treatment, bty = "n", cex = 0.83)
+  abline(v = max(P1.days))
+  abline(v = max(P2.days))
+  text(x, rep((max(Ch2_meso_3.1[,k])+(0.2*max(Ch2_meso_3.1[,k]))), times = 3), labels = p.levels)
+  graphics.off()
+  
+    ## This section plots the difference GAMM of the model with the lowest AIC
+  png(paste("diff_GAMM_", colnames(Ch2_meso_3.1)[k], "_", expt, ".png", sep = ""), res = 300, width = 170, height = 127.5, units = "mm", pointsize = 12)
+  par(mfrow=c(1, 1), mar=c(5, 4, 2, 2)+0.1)
+  plot(NA, xlim = c(0,24), ylim = c((max(Ch2_meso_3.1[,k]-(0.2*Ch2_meso_3.1[,k]))*-1),max(Ch2_meso_3.1[,k])+(0.2*max(Ch2_meso_3.1[,k]))), xlab = "Day", ylab = "Response", main = colnames(Ch2_meso_3.1)[k], xaxs = "i")  
+  plot_diff(mod.list[[myModel]], view = "DayN", n.grid=181, comp = list(TID = c(treatment[1],treatment[2])), add = T, col = A.col, col.diff = A.col)
+  plot_diff(mod.list[[myModel]], view = "DayN", n.grid=181, comp = list(TID = c(treatment[1],treatment[3])), add = T, col = B.col, col.diff = B.col)
+  legend("topright", lty = 1, col = levels(Treatment.colour)[-1], legend = treatment[-1], bty = "n", cex = 0.83)
+  abline(v = max(P1.days))
+  abline(v = max(P2.days))
+  abline(h = 0, lty = 2)
+  text(x, rep((max(Ch2_meso_3.1[,k])+(0.2*max(Ch2_meso_3.1[,k]))), times = 3), labels = p.levels)
+  graphics.off()
+  
+  ## This section determines the difference GAMM models that correspond to the graphs
+  m.ar2a <- bam(y ~ ofTID + s(DayN, by = ofTID, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = Ch2_meso_3.1)
+  m.ar3a <- bam(y ~ ofTID + s(DayN, k = myk) + s(DayN, by = ofTID, k = myk), correlation = corAR1(form = ~ DayN | as.factor(Bag)), data = Ch2_meso_3.1)
+
+  summary(m.ar3a)
+  
+  mod.lista <-list(m.ar2a, m.ar3a)
+  
+      ## This section outputs the summary statistics for the difference GAMM representing the GAMM with the lowest AIC
+  summ.out.F[[k-7]] <- as.data.frame(cbind(summary(mod.lista[[myModel-1]])$s.table, rep(colnames(Ch2_meso_3.1)[k], times = length(summary(mod.lista[[myModel-1]])$s.table[,1]))))
+  }
+warnings()
+# This section collates the AIC information and outputs to a .csv file
+AIC.out.F
+AIC.output.F <- AIC.out.F[[1]]
+for(i in 2:length(AIC.out.F)){
+AIC.output.F <- rbind(AIC.output.F, AIC.out.F[[i]])
+}
+
+write.csv(AIC.output.F, "Ch2_ME3_GAMMs_AIC.csv")
+
+# This section collates the summary inforamtion from the difference GAMM's and outputs to a .csv file
+summ.out.F
+summ.output.F <- summ.out.F[[1]]
+for(i in 2:length(summ.out.F)){
+summ.output.F <- rbind(summ.output.F, summ.out.F[[i]])
+}
+
+write.csv(summ.output.F, "Ch2_ME3_GAMMs_SUMM.csv")
+getwd()
+```
+
+##Significant taxa
+
+```{r Taxa test deseq2}
+kostic_M3 <- Phyloseq_M3_rm
+
+physeq2Phylum_M3=tax_glom(Phyloseq_M3_rm,"Phylum",NArm=TRUE)
+kostic_M3 <- physeq2Phylum_M3
+physeq2Phylum_M3
+
+physeq2Family_M3=tax_glom(Phyloseq_M3_rm,"Family",NArm=TRUE)
+kostic_M3 <- physeq2Family_M3
+physeq2Family_M3
+
+physeq2Genus_M3=tax_glom(Phyloseq_M3_rm,"Genus",NArm=TRUE)
+kostic_M3 <- physeq2Genus_M3
+physeq2Genus_M3
+ASV491$Phyloseq_M3_rm
+#write.csv(otu_table(Phyloseq_M3_rm), "M3_OTUs.csv")
+diagdds_M3 = phyloseq_to_deseq2(kostic_M3, ~ DayN)
+diagdds_M3 = DESeq(diagdds_M3, test="Wald", fitType="parametric")
+
+res = results(diagdds_M3, cooksCutoff = FALSE)
+alpha = 0.05
+sigtab = res[which(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(kostic_M3)[rownames(sigtab), ], "matrix"))
+head(sigtab)
+sigtab
+dim(sigtab)
+
+#library("ggplot2")
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+    scale_fill_brewer(palette = palname, ...)
+}
+# Phylum order
+x = tapply(sigtab$log2FoldChange, sigtab$Phylum, function(x) max(x))
+x = sort(x, TRUE)
+sigtab$Phylum = factor(as.character(sigtab$Phylum), levels=names(x))
+# Genus order
+x = tapply(sigtab$log2FoldChange, sigtab$Genus, function(x) max(x))
+x = sort(x, TRUE)
+sigtab$Genus = factor(as.character(sigtab$Genus), levels=names(x))
+ggplot(sigtab, aes(x=Genus, y=log2FoldChange, color=Phylum)) + geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+
+```
+
+
